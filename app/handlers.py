@@ -6,6 +6,11 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton
 )
+
+from aiogram import Bot
+import time
+from aiogram.types import BotCommand
+from aiogram.types import BotCommandScopeDefault
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
@@ -97,27 +102,43 @@ MENU_TEXTS = {"➕ Guruhga qo‘shish", "📋 Yangi viktorina", "📊 Reyting", 
 # ----------------------------
 # /start & /menu
 # ----------------------------
+
+processed_events = {}
+
 @router.message(Command("start"))
 async def start_cmd(message: Message):
-    user_id = message.from_user.id
     me = await message.bot.get_me()
 
-    # Try to get all groups for user (new API)
+    # Agar guruh yoki supergroup bo‘lsa, faqat ma'lumot beramiz, lekin xabar yuborishni my_chat_member ga qoldiramiz
+    if message.chat.type in ("group", "supergroup"):
+        # Check if this is a fresh group addition
+        event_key = f"{message.chat.id}:start:{message.date}"
+        if event_key in processed_events and time() - processed_events[event_key] < 5:
+            logger.debug(f"Ignoring duplicate /start in chat {message.chat.id}")
+            return
+        processed_events[event_key] = time.time()
+
+        # Let my_chat_member handle the "bot added" message
+        return
+
+    # Faqat private chat bo‘lsa menyuni ko‘rsatamiz
+    user_id = message.from_user.id
     try:
         groups = db.get_groups(user_id) or []
     except Exception:
-        # fallback to single get_group if older implementation
         g = db.get_group(user_id)
         groups = [g] if g else []
 
     if not groups:
-        await message.answer(
+        await safe_answer(
+            message,
             "Salom 👋 CyberQuizBot ga xush kelibsiz!\n\n"
             "❗ Avval botni guruhga qo‘shing va uni admin qiling, keyin viktorina yaratishingiz mumkin.",
             reply_markup=add_to_group_keyboard(me.username)
         )
     else:
-        await message.answer(
+        await safe_answer(
+            message,
             "✅ Bot ulangan! Asosiy menyu:",
             reply_markup=main_menu_keyboard()
         )
@@ -125,7 +146,17 @@ async def start_cmd(message: Message):
 
 @router.message(Command("menu"))
 async def menu_cmd(message: Message):
+    # Guruhlarda menyu chiqmasin
+    if message.chat.type in ("group", "supergroup"):
+        await message.answer(
+            "❌ Bu buyruq guruhda ishlamaydi.\n"
+            "📩 Botga shaxsiy yozib menyudan foydalanishingiz mumkin."
+        )
+        return
+
+    # Faqat private chatda menyu chiqadi
     await message.answer("📍 Asosiy menyu", reply_markup=main_menu_keyboard())
+
 
 
 # ----------------------------
@@ -217,51 +248,100 @@ async def choose_group_callback(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+
+async def set_bot_commands(bot: Bot):
+    # Faqat private chat uchun komandalarni o‘rnatamiz
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Botni ishga tushirish"),
+            BotCommand(command="menu", description="Asosiy menyu"),
+            BotCommand(command="rating", description="Reytingni ko‘rish"),
+            BotCommand(command="cancel", description="Viktorinani bekor qilish"),
+        ],
+        scope=BotCommandScopeDefault()
+    )
+
+
 # ----------------------------
-# Bot added to group / admin only notification
+# Bot added to group / admin status change notification
 # ----------------------------
 @router.my_chat_member()
 async def on_bot_my_chat_member(event: ChatMemberUpdated):
     bot = event.bot
-    new_status = event.new_chat_member.status  # 'member', 'administrator', 'left', ...
+    new_status = event.new_chat_member.status
+    old_status = event.old_chat_member.status if event.old_chat_member else None
     chat = event.chat
     inviter = event.from_user
 
-    if new_status == "administrator":
-        # only notify group when bot is made admin
-        try:
-            await bot.send_message(
-                chat.id,
-                "🤖 CyberQuizBot guruhga muvaffaqiyatli ulanib, ADMIN qilindi!\n\n"
-                "Endi bu guruhda viktorina yaratishingiz mumkin ✅"
-            )
-        except Exception as e:
-            logger.exception("Guruhga xabar yuborilmadi: %s", e)
+    # Create a unique key for this event
+    event_key = f"{chat.id}:{new_status}:{event.date}"
+    if event_key in processed_events and time.time() - processed_events[event_key] < 5:
+        logger.debug(f"Ignoring duplicate event: {event_key}")
+        return
+    processed_events[event_key] = time.time()
 
-        # notify inviter in private chat (if exists and not bot)
+
+    # Log the event for debugging
+    logger.info(
+        f"ChatMemberUpdated: chat={chat.id} ({chat.title}), "
+        f"new_status={new_status}, old_status={old_status}, inviter={inviter.id}"
+    )
+
+    # Handle bot added as member (only if transitioning to 'member' status)
+    if new_status == "member" and old_status != "member":
+        await safe_send_message(
+            bot,
+            chat.id,
+            "🤖 Bot guruhga qo‘shildi, lekin ishlamaydi.\n\n"
+            "⚠️ Botni ADMIN qiling va keyin botga qaytib shaxsiy chatda viktorina yaratib, guruhga yuboring."
+        )
+        # Save group to DB with title
+        try:
+            db.save_group(inviter.id, chat.id, chat.title)
+        except Exception as e:
+            logger.exception(f"DB.save_group xato (chat={chat.id}): {e}")
+
+    # Handle bot promoted to admin
+    elif new_status == "administrator" and old_status != "administrator":
+        # Send confirmation to the group
+        await safe_send_message(
+            bot,
+            chat.id,
+            "✅ Bot guruhga ulandi va ADMIN qilindi!\n\n"
+            "🎯 Endi bot bilan shaxsiy chatda viktorina yaratib, guruhga yuborishingiz mumkin."
+        )
+
+        # Send confirmation to the inviter (in private chat)
         if inviter and not inviter.is_bot:
             try:
-                me = await bot.get_me()
-                await bot.send_message(
+                await safe_send_message(
+                    bot,
                     inviter.id,
                     "✅ Guruh muvaffaqiyatli ulandi va bot ADMIN qilindi!\n\n"
                     "Asosiy menyudan yangi viktorina yarating:",
                     reply_markup=main_menu_keyboard()
                 )
             except Exception as e:
-                logger.exception("Inviterga xabar yuborilmadi: %s", e)
+                logger.exception(f"Inviterga xabar yuborilmadi (user={inviter.id}): {e}")
 
-            # save group in DB linked to inviter
-            try:
-                db.save_group(inviter.id, chat.id)
-            except Exception as e:
-                logger.exception("DB.save_group xato: %s", e)
+        # Save group to DB with title
+        try:
+            db.save_group(inviter.id, chat.id, chat.title)
+        except Exception as e:
+            logger.exception(f"DB.save_group xato (chat={chat.id}): {e}")
 
-    elif new_status == "member":
-        # do nothing (we don't spam group when bot added as simple member)
-        logger.info("Bot guruhga qo'shildi (member): %s", chat.title)
+    # Handle bot removed from group
     elif new_status == "left":
-        logger.info("Bot guruhdan chiqarildi: %s", chat.title)
+        logger.info(f"Bot guruhdan chiqarildi: {chat.title} (chat_id={chat.id})")
+        # Optionally, remove group from DB
+        try:
+            db.remove_group(chat.id)  # Assuming you have a remove_group function
+        except Exception as e:
+            logger.exception(f"DB.remove_group xato (chat={chat.id}): {e}")
+
+    # Ignore other status changes to prevent duplicate messages
+    else:
+        logger.debug(f"Ignored status change: {old_status} -> {new_status} in chat {chat.id}")
 
 
 @router.callback_query(F.data.startswith("quiz_size:"))

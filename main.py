@@ -5,6 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
+from app.handlers import set_bot_commands
 
 from app.handlers import router
 from app.db import init_db
@@ -25,6 +26,7 @@ async def main():
     logging.info("🤖 Bot ishga tushyapti...")
     await dp.start_polling(bot)
 
+    await set_bot_commands(bot) 
 
 if __name__ == "__main__":
     asyncio.run(main())

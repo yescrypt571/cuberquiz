@@ -33,7 +33,7 @@ def init_db():
     # quizzes jadvali
     cur.execute("""
         CREATE TABLE IF NOT EXISTS quizzes (
-            quiz_id INTEGER PRIMARY KEY,
+            quiz_id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT,
             group_id INTEGER NOT NULL,
             start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -64,6 +64,7 @@ def save_group(user_id: int, group_id: int, group_title: str = None):
     finally:
         conn.close()
 
+
 def get_groups(user_id: int):
     """Foydalanuvchiga tegishli barcha guruhlarni (id + title) qaytaradi."""
     try:
@@ -78,17 +79,36 @@ def get_groups(user_id: int):
     finally:
         conn.close()
 
+
 def get_group(user_id: int):
     """Eski moslik uchun — faqat oxirgi qo‘shilgan guruhni qaytaradi."""
     try:
         conn = sqlite3.connect(DB_FILE)
         cur = conn.cursor()
-        cur.execute("SELECT group_id, group_title FROM user_groups WHERE user_id = ? ORDER BY rowid DESC LIMIT 1", (user_id,))
+        cur.execute("""
+            SELECT group_id, group_title 
+            FROM user_groups 
+            WHERE user_id = ? 
+            ORDER BY rowid DESC LIMIT 1
+        """, (user_id,))
         row = cur.fetchone()
         return row if row else None
     except sqlite3.Error as e:
         print(f"DB.get_group xato: {e}")
         return None
+    finally:
+        conn.close()
+
+
+def remove_group(group_id: int):
+    """Guruhni bazadan o‘chirish."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM user_groups WHERE group_id = ?", (group_id,))
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"DB.remove_group xato: {e}")
     finally:
         conn.close()
 
@@ -147,6 +167,11 @@ def get_leaderboard(quiz_id: int, group_id: int, limit: int = 10):
     finally:
         conn.close()
 
+
+# --------------------------
+# Migration
+# --------------------------
+
 def migrate_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -160,7 +185,5 @@ def migrate_db():
         conn.close()
 
 
-
 if __name__ == "__main__":
-    if not os.path.exists(DB_FILE):
-        init_db()
+    init_db()
